@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+
+# Local model/data artifacts
+*.pth
+*.pt
+/data/
+/dataset/
