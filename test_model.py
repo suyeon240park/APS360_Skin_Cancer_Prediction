@@ -1,79 +1,86 @@
+import argparse
+from pathlib import Path
+
 import torch
-import torchvision.transforms as transforms
-from torchvision import datasets
 from torch.utils.data import DataLoader
-import torchvision.models as models
-import torch.nn as nn
+from torchvision import datasets
 
-# Model architecture (same as during training)
-class SkinLesionClassifier(nn.Module):
-    def __init__(self, num_classes=4):
-        super(SkinLesionClassifier, self).__init__()
-        # Use ResNet50 as backbone
-        self.backbone = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
-        
-        # Remove the fully connected layer and replace with GAP
-        num_ftrs = self.backbone.fc.in_features
-        self.backbone.fc = nn.Identity()
-        
-        # Global Average Pooling
-        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        
-        # Fully connected classifier
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(num_ftrs, 512),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(512, num_classes),
-            nn.Softmax(dim=1)  # Softmax for classification
-        )
+from model import get_transforms, load_model
 
-    def forward(self, x):
-        features = self.backbone(x)  # Extract features
-        features = self.global_avg_pool(features)  # Apply GAP
-        return self.classifier(features)
 
-# Load the best model
-def load_model(model_path, num_classes=4):
-    model = SkinLesionClassifier(num_classes=num_classes)
-    model.load_state_dict(torch.load(model_path))
-    model.eval()
-    return model
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Evaluate the APS360 skin-lesion classifier on an ImageFolder dataset."
+    )
+    parser.add_argument(
+        "data_dir",
+        type=Path,
+        help="Directory containing one subdirectory per class, as required by ImageFolder.",
+    )
+    parser.add_argument(
+        "--model",
+        type=Path,
+        default=Path("best_model.pth"),
+        help="Path to a trained model state_dict (default: best_model.pth).",
+    )
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--device",
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Torch device, for example cpu, cuda, or mps.",
+    )
+    return parser.parse_args()
 
-# Define the transformation for new data
-def get_transforms():
-    return transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                           std=[0.229, 0.224, 0.225])
-    ])
 
-# Load new data
-def load_new_data(data_path, batch_size=32):
-    dataset = datasets.ImageFolder(root=data_path, transform=get_transforms())
-    data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-    return data_loader
+def evaluate(
+    model: torch.nn.Module,
+    data_loader: DataLoader,
+    device: str,
+) -> tuple[int, int]:
+    correct = 0
+    total = 0
 
-# Make predictions
-def predict(model, data_loader):
-    all_preds = []
     with torch.no_grad():
-        for inputs, _ in data_loader:
-            outputs = model(inputs)
-            _, predicted = torch.max(outputs, 1)
-            all_preds.extend(predicted.cpu().numpy())
-    return all_preds
+        for images, labels in data_loader:
+            images = images.to(device)
+            labels = labels.to(device)
 
-# Example usage
+            logits = model(images)
+            predictions = logits.argmax(dim=1)
+
+            correct += (predictions == labels).sum().item()
+            total += labels.numel()
+
+    return correct, total
+
+
+def main() -> None:
+    args = parse_args()
+    if not args.data_dir.is_dir():
+        raise FileNotFoundError(f"Dataset directory not found: {args.data_dir}")
+    if not args.model.is_file():
+        raise FileNotFoundError(f"Model checkpoint not found: {args.model}")
+
+    dataset = datasets.ImageFolder(root=args.data_dir, transform=get_transforms())
+    data_loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=0,
+    )
+
+    model = load_model(
+        args.model,
+        num_classes=len(dataset.classes),
+        device=args.device,
+    )
+    correct, total = evaluate(model, data_loader, args.device)
+
+    print(f"Classes: {dataset.classes}")
+    print(f"Samples: {total}")
+    if total:
+        print(f"Accuracy: {correct / total:.2%}")
+
+
 if __name__ == "__main__":
-    model_path = 'best_model.pth'
-    new_data_path = 'test_data.jpg'
-    batch_size = 32
-
-    model = load_model(model_path)
-    new_data_loader = load_new_data(new_data_path, batch_size)
-    predictions = predict(model, new_data_loader)
-
-    print("Predictions:", predictions)
+    main()
